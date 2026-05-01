@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: binance-proxy
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: PROXY_SECRET
+        sync: false
+      - key: BINANCE_BASE
+        value: https://fapi.binance.com
