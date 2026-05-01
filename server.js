@@ -103,9 +103,42 @@ function connectWebSocket() {
         const label = isSL ? "STOP LOSS HIT" : "TAKE PROFIT HIT";
         const side = o.S; // BUY or SELL
         const pnl = parseFloat(o.rp || 0);
+        const symbol = o.s;
+
+        // --- AUTO-CANCEL: When SL hits, check if position is fully closed → cancel remaining TPs ---
+        // --- When TP hits, check if position is fully closed → cancel remaining SL ---
+        if (isFilled) {
+          try {
+            // Check remaining position
+            const posR = await signedFetch("/fapi/v2/positionRisk", { symbol, timestamp: Date.now(), recvWindow: 5000 }, "GET");
+            const positions = await posR.json();
+
+            let positionClosed = true;
+            if (Array.isArray(positions)) {
+              for (const pos of positions) {
+                if (pos.symbol === symbol && parseFloat(pos.positionAmt || 0) !== 0) {
+                  positionClosed = false;
+                  break;
+                }
+              }
+            }
+
+            if (positionClosed) {
+              // Cancel all remaining open orders for this symbol
+              const cancelR = await signedFetch("/fapi/v1/allOpenOrders", { symbol, timestamp: Date.now(), recvWindow: 5000 }, "DELETE");
+              console.log(`position closed — cancelled remaining orders: ${cancelR.status}`);
+
+              // Also cancel algo orders
+              const algoR = await signedFetch("/fapi/v1/allAlgoOrders", { symbol, timestamp: Date.now(), recvWindow: 5000 }, "DELETE");
+              console.log(`cancelled algo orders: ${algoR.status}`);
+            }
+          } catch (e) {
+            console.error("auto-cancel error:", e.message);
+          }
+        }
 
         let msg = `${emoji} *${label}*\n\n`;
-        msg += `*Symbol:* ${o.s}\n`;
+        msg += `*Symbol:* ${symbol}\n`;
         msg += `*Side:* ${side}\n`;
         msg += `*Type:* ${type}\n`;
         msg += `*Qty Filled:* ${o.z}\n`;
@@ -116,7 +149,7 @@ function connectWebSocket() {
         msg += `*Status:* ${o.X}\n`;
         msg += `\n*Time:* ${new Date(event.T).toUTCString()}`;
 
-        console.log(`${label}: ${o.s} ${side} qty=${o.z} pnl=${pnl}`);
+        console.log(`${label}: ${symbol} ${side} qty=${o.z} pnl=${pnl}`);
         await sendWhatsApp(msg);
       }
     } catch (e) {
