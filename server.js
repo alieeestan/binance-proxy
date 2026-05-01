@@ -11,6 +11,17 @@ const BINANCE_BASE = process.env.BINANCE_BASE || "https://fapi.binance.com";
 // Health check
 app.get("/", (req, res) => res.send("ok"));
 
+// Get outbound IP
+app.get("/my-ip", async (req, res) => {
+  try {
+    const r = await fetch("https://api.ipify.org?format=json");
+    const data = await r.json();
+    res.json({ outbound_ip: data.ip });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Proxy endpoint: receives signed params from Cloudflare Worker, forwards to Binance
 app.post("/proxy", async (req, res) => {
   try {
