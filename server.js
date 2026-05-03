@@ -96,8 +96,10 @@ function connectWebSocket() {
         const type = o.ot || o.o; // original order type
         const isSL = type === "STOP_MARKET" || type === "STOP";
         const isTP = type === "TAKE_PROFIT_MARKET" || type === "TAKE_PROFIT";
+        const isEntry = type === "MARKET" || type === "LIMIT";
 
-        if (!isSL && !isTP) return;
+        // Skip entry fills (those are notified by the Cloudflare Worker)
+        if (isEntry) return;
 
         const emoji = isSL ? "🛑" : "✅";
         const label = isSL ? "STOP LOSS HIT" : "TAKE PROFIT HIT";
