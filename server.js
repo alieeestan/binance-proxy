@@ -128,9 +128,19 @@ function connectWebSocket() {
               const cancelR = await signedFetch("/fapi/v1/allOpenOrders", { symbol, timestamp: Date.now(), recvWindow: 5000 }, "DELETE");
               console.log(`position closed — cancelled remaining orders: ${cancelR.status}`);
 
-              // Also cancel algo orders
-              const algoR = await signedFetch("/fapi/v1/allAlgoOrders", { symbol, timestamp: Date.now(), recvWindow: 5000 }, "DELETE");
-              console.log(`cancelled algo orders: ${algoR.status}`);
+              // Also cancel algo/conditional orders
+              try {
+                const openAlgos = await signedFetch("/fapi/v1/algoOrder/openOrders", { symbol, timestamp: Date.now(), recvWindow: 5000 }, "GET");
+                const algoData = await openAlgos.json();
+                if (Array.isArray(algoData?.rows)) {
+                  for (const algo of algoData.rows) {
+                    const delR = await signedFetch("/fapi/v1/algoOrder", { symbol, algoId: algo.algoId, timestamp: Date.now(), recvWindow: 5000 }, "DELETE");
+                    console.log(`cancelled algo ${algo.algoId}: ${delR.status}`);
+                  }
+                }
+              } catch (e) {
+                console.error("algo cancel error:", e.message);
+              }
             }
           } catch (e) {
             console.error("auto-cancel error:", e.message);
@@ -157,9 +167,12 @@ function connectWebSocket() {
     }
   });
 
-  ws.on("close", () => {
-    console.log("WebSocket closed, reconnecting in 5s...");
-    setTimeout(connectWebSocket, 5000);
+  ws.on("close", async () => {
+    console.log("WebSocket closed, recreating listenKey and reconnecting in 5s...");
+    setTimeout(async () => {
+      await createListenKey(); // Get fresh listenKey — old one may have expired
+      connectWebSocket();
+    }, 5000);
   });
 
   ws.on("error", (e) => {
