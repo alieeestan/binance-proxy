@@ -119,7 +119,7 @@ async function moveSL(pos, newSLPrice, reason) {
 
   // Also cancel any other open algo orders for this symbol (safety)
   try {
-    const openAlgos = await signedFetch("/fapi/v1/algoOrder/openOrders", {
+    const openAlgos = await signedFetch("/fapi/v1/algoOrder", {
       symbol: pos.symbol, timestamp: Date.now(), recvWindow: 5000,
     }, "GET", ak, as);
     const algoData = await openAlgos.json();
@@ -363,7 +363,7 @@ function connectUserStream() {
 
               // Cancel any remaining algo orders
               try {
-                const openAlgos = await signedFetch("/fapi/v1/algoOrder/openOrders", {
+                const openAlgos = await signedFetch("/fapi/v1/algoOrder", {
                   symbol, timestamp: Date.now(), recvWindow: 5000,
                 }, "GET", pos.apiKey, pos.apiSecret);
                 const algoData = await openAlgos.json();
@@ -524,6 +524,21 @@ app.get("/positions", (req, res) => {
   res.json(openPositions);
 });
 
+// Remove position from Ghost Trail tracking
+app.delete("/position/:key", (req, res) => {
+  if (req.headers["x-proxy-secret"] !== PROXY_SECRET) {
+    return res.status(401).json({ error: "bad proxy secret" });
+  }
+  const key = req.params.key;
+  if (openPositions[key]) {
+    delete openPositions[key];
+    console.log(`ghost trail: removed ${key} from tracking`);
+    res.json({ ok: true, removed: key });
+  } else {
+    res.json({ ok: true, message: "not tracked" });
+  }
+});
+
 // Diagnostic: test if proxy can place/cancel orders with its own keys
 app.get("/test-keys", async (req, res) => {
   try {
@@ -601,8 +616,14 @@ app.post("/proxy", async (req, res) => {
       headers: { "X-MBX-APIKEY": apiKey },
     });
 
-    const body = await result.json();
-    res.status(result.status).json(body);
+    const ct = result.headers.get("content-type") || "";
+    if (ct.includes("json")) {
+      const body = await result.json();
+      res.status(result.status).json(body);
+    } else {
+      const text = await result.text();
+      res.status(result.status).json({ error: `Binance returned non-JSON (${result.status})`, body: text.slice(0, 200) });
+    }
   } catch (e) {
     console.error("proxy error:", e.message);
     res.status(500).json({ error: e.message });
