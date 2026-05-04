@@ -34,11 +34,14 @@ async function sendWhatsApp(message) {
 }
 
 // ─── Binance signed request helper ──────────────────────────
-async function signedFetch(endpoint, params, method = "POST") {
+// keyOverride/secretOverride allow using the worker's keys instead of proxy env vars
+async function signedFetch(endpoint, params, method = "POST", keyOverride = null, secretOverride = null) {
+  const key = keyOverride || API_KEY;
+  const secret = secretOverride || API_SECRET;
   const qs = Object.entries(params).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
-  const signature = crypto.createHmac("sha256", API_SECRET).update(qs).digest("hex");
+  const signature = crypto.createHmac("sha256", secret).update(qs).digest("hex");
   const url = `${BINANCE_BASE}${endpoint}?${qs}&signature=${signature}`;
-  return fetch(url, { method, headers: { "X-MBX-APIKEY": API_KEY } });
+  return fetch(url, { method, headers: { "X-MBX-APIKEY": key } });
 }
 
 // ─── Ghost Trail: Position Tracker ──────────────────────────
@@ -50,11 +53,11 @@ function posKey(symbol, positionSide) {
   return `${symbol}_${positionSide}`;
 }
 
-async function cancelAlgoOrder(symbol, algoId) {
+async function cancelAlgoOrder(symbol, algoId, apiKey, apiSecret) {
   try {
     const r = await signedFetch("/fapi/v1/algoOrder", {
       symbol, algoId, timestamp: Date.now(), recvWindow: 5000,
-    }, "DELETE");
+    }, "DELETE", apiKey, apiSecret);
     const body = await r.json();
     console.log(`cancel algo ${algoId}: ${r.status} ${body.msg || "ok"}`);
     return r.status === 200;
@@ -64,7 +67,7 @@ async function cancelAlgoOrder(symbol, algoId) {
   }
 }
 
-async function placeNewSL(symbol, closeSide, positionSide, triggerPrice, qty) {
+async function placeNewSL(symbol, closeSide, positionSide, triggerPrice, qty, apiKey, apiSecret) {
   try {
     const r = await signedFetch("/fapi/v1/algoOrder", {
       symbol, side: closeSide, type: "STOP_MARKET",
@@ -72,7 +75,7 @@ async function placeNewSL(symbol, closeSide, positionSide, triggerPrice, qty) {
       triggerPrice: triggerPrice.toString(),
       quantity: qty, priceProtect: "TRUE",
       timestamp: Date.now(), recvWindow: 5000,
-    });
+    }, "POST", apiKey, apiSecret);
     const body = await r.json();
     console.log(`new SL at ${triggerPrice}: ${r.status} algoId=${body.algoId || body.msg}`);
     return body.algoId || null;
@@ -82,13 +85,13 @@ async function placeNewSL(symbol, closeSide, positionSide, triggerPrice, qty) {
   }
 }
 
-async function closePositionMarket(symbol, closeSide, positionSide, qty) {
+async function closePositionMarket(symbol, closeSide, positionSide, qty, apiKey, apiSecret) {
   try {
     const r = await signedFetch("/fapi/v1/order", {
       symbol, side: closeSide, type: "MARKET",
       positionSide, quantity: qty,
       timestamp: Date.now(), recvWindow: 5000,
-    });
+    }, "POST", apiKey, apiSecret);
     const body = await r.json();
     console.log(`close position: ${r.status} orderId=${body.orderId || body.msg}`);
     return body.orderId || null;
@@ -103,14 +106,14 @@ async function moveSL(pos, newSLPrice, reason) {
   pos.moving = true;
 
   const key = posKey(pos.symbol, pos.positionSide);
+  const ak = pos.apiKey;
+  const as = pos.apiSecret;
   console.log(`ghost trail: moving SL for ${key} to ${newSLPrice} (${reason})`);
-  console.log(`  using API_KEY: ${API_KEY ? API_KEY.slice(0, 8) + "..." : "NOT SET"}`);
-  console.log(`  using API_SECRET: ${API_SECRET ? "SET" : "NOT SET"}`);
+  console.log(`  using keys from: ${ak ? "worker (✅)" : "proxy env"}`);
 
   // Cancel current SL
-  let cancelOk = false;
   if (pos.slAlgoId) {
-    cancelOk = await cancelAlgoOrder(pos.symbol, pos.slAlgoId);
+    const cancelOk = await cancelAlgoOrder(pos.symbol, pos.slAlgoId, ak, as);
     console.log(`  cancel old SL ${pos.slAlgoId}: ${cancelOk ? "OK" : "FAILED"}`);
   }
 
@@ -118,20 +121,20 @@ async function moveSL(pos, newSLPrice, reason) {
   try {
     const openAlgos = await signedFetch("/fapi/v1/algoOrder/openOrders", {
       symbol: pos.symbol, timestamp: Date.now(), recvWindow: 5000,
-    }, "GET");
+    }, "GET", ak, as);
     const algoData = await openAlgos.json();
     console.log(`  open algos: ${algoData?.rows?.length || 0} found`);
     if (Array.isArray(algoData?.rows)) {
       for (const algo of algoData.rows) {
         if (algo.algoId !== pos.slAlgoId) {
-          await cancelAlgoOrder(pos.symbol, algo.algoId);
+          await cancelAlgoOrder(pos.symbol, algo.algoId, ak, as);
         }
       }
     }
   } catch (e) { console.error("cleanup algos:", e.message); }
 
   // Place new SL
-  const newAlgoId = await placeNewSL(pos.symbol, pos.closeSide, pos.positionSide, newSLPrice, pos.qty);
+  const newAlgoId = await placeNewSL(pos.symbol, pos.closeSide, pos.positionSide, newSLPrice, pos.qty, ak, as);
   console.log(`  new SL result: ${newAlgoId ? "algoId=" + newAlgoId : "FAILED"}`);
 
   if (newAlgoId) {
@@ -198,8 +201,8 @@ function startPriceMonitor() {
               pos.tp3Reached = true;
               console.log(`ghost trail: TP3 hit for ${key} at ${markPrice}`);
 
-              if (pos.slAlgoId) await cancelAlgoOrder(pos.symbol, pos.slAlgoId);
-              await closePositionMarket(pos.symbol, pos.closeSide, pos.positionSide, pos.qty);
+              if (pos.slAlgoId) await cancelAlgoOrder(pos.symbol, pos.slAlgoId, pos.apiKey, pos.apiSecret);
+              await closePositionMarket(pos.symbol, pos.closeSide, pos.positionSide, pos.qty, pos.apiKey, pos.apiSecret);
 
               const profit = isLong
                 ? (markPrice - pos.entryPrice) * parseFloat(pos.qty)
@@ -362,11 +365,11 @@ function connectUserStream() {
               try {
                 const openAlgos = await signedFetch("/fapi/v1/algoOrder/openOrders", {
                   symbol, timestamp: Date.now(), recvWindow: 5000,
-                }, "GET");
+                }, "GET", pos.apiKey, pos.apiSecret);
                 const algoData = await openAlgos.json();
                 if (Array.isArray(algoData?.rows)) {
                   for (const algo of algoData.rows) {
-                    await cancelAlgoOrder(symbol, algo.algoId);
+                    await cancelAlgoOrder(symbol, algo.algoId, pos.apiKey, pos.apiSecret);
                   }
                 }
               } catch (e) { console.error("cleanup after SL:", e.message); }
@@ -488,7 +491,7 @@ app.post("/position", (req, res) => {
       return res.status(401).json({ error: "bad proxy secret" });
     }
 
-    const { symbol, side, positionSide, closeSide, entryPrice, qty, slPrice, tp1Price, tp2Price, tp3Price, slAlgoId } = req.body;
+    const { symbol, side, positionSide, closeSide, entryPrice, qty, slPrice, tp1Price, tp2Price, tp3Price, slAlgoId, apiKey, apiSecret } = req.body;
 
     if (!symbol || !positionSide || !entryPrice) {
       return res.status(400).json({ error: "missing fields" });
@@ -501,6 +504,8 @@ app.post("/position", (req, res) => {
       entryPrice: parseFloat(entryPrice),
       qty, slPrice, tp1Price, tp2Price, tp3Price,
       slAlgoId,
+      apiKey: apiKey || API_KEY,     // use worker's keys, fallback to proxy env
+      apiSecret: apiSecret || API_SECRET,
       currentSL: parseFloat(slPrice),
       tp1Reached: false, tp2Reached: false, tp3Reached: false,
       moving: false,
