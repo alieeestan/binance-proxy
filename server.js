@@ -136,24 +136,25 @@ async function moveSL(pos, newSLPrice, reason) {
   return newAlgoId;
 }
 
-// ─── Ghost Trail: Price Monitor WebSocket ───────────────────
-let priceWs = null;
+// ─── Ghost Trail: Price Monitor (REST polling every 2s) ─────
+let priceInterval = null;
 
-function connectPriceStream() {
-  // Subscribe to all mark prices at 1s interval
-  priceWs = new WebSocket(`${BINANCE_WS}/ws/!markPrice@arr@1s`);
+function startPriceMonitor() {
+  console.log("Price monitor started (polling every 2s)");
 
-  priceWs.on("open", () => console.log("Price stream connected"));
+  priceInterval = setInterval(async () => {
+    // Only poll if we have positions to track
+    const trackedKeys = Object.keys(openPositions);
+    if (trackedKeys.length === 0) return;
 
-  priceWs.on("message", async (raw) => {
-    try {
-      const prices = JSON.parse(raw.toString());
-      if (!Array.isArray(prices)) return;
+    // Get unique symbols being tracked
+    const symbols = [...new Set(trackedKeys.map(k => openPositions[k].symbol))];
 
-      // Only process symbols we're tracking
-      for (const p of prices) {
-        const symbol = p.s;
-        const markPrice = parseFloat(p.p);
+    for (const symbol of symbols) {
+      try {
+        const r = await fetch(`${BINANCE_BASE}/fapi/v1/ticker/price?symbol=${symbol}`);
+        const data = await r.json();
+        const markPrice = parseFloat(data.price);
         if (!markPrice) continue;
 
         // Check both LONG and SHORT positions for this symbol
@@ -174,10 +175,7 @@ function connectPriceStream() {
               pos.tp3Reached = true;
               console.log(`ghost trail: TP3 hit for ${key} at ${markPrice}`);
 
-              // Cancel SL
               if (pos.slAlgoId) await cancelAlgoOrder(pos.symbol, pos.slAlgoId);
-
-              // Close position
               await closePositionMarket(pos.symbol, pos.closeSide, pos.positionSide, pos.qty);
 
               const profit = isLong
@@ -205,7 +203,7 @@ function connectPriceStream() {
               pos.tp2Reached = true;
               console.log(`ghost trail: TP2 hit for ${key} at ${markPrice}`);
 
-              const newSL = tp1; // Move SL to 1:1 level
+              const newSL = tp1;
               const newAlgoId = await moveSL(pos, newSL, "TP2 hit → SL to 1:1");
 
               const locked = isLong
@@ -232,7 +230,7 @@ function connectPriceStream() {
               pos.tp1Reached = true;
               console.log(`ghost trail: TP1 hit for ${key} at ${markPrice}`);
 
-              const newSL = pos.entryPrice; // Move SL to breakeven
+              const newSL = pos.entryPrice;
               const newAlgoId = await moveSL(pos, newSL, "TP1 hit → SL to BE");
 
               let msg = `📈 *SL Moved to Breakeven*\n\n`;
@@ -248,21 +246,11 @@ function connectPriceStream() {
             }
           }
         }
+      } catch (e) {
+        console.error(`price poll error for ${symbol}:`, e.message);
       }
-    } catch (e) {
-      // Don't spam logs for parse errors on every tick
     }
-  });
-
-  priceWs.on("close", () => {
-    console.log("Price stream closed, reconnecting in 3s...");
-    setTimeout(connectPriceStream, 3000);
-  });
-
-  priceWs.on("error", (e) => {
-    console.error("Price stream error:", e.message);
-    priceWs.close();
-  });
+  }, 2000); // Poll every 2 seconds
 }
 
 // ─── User Data Stream (WebSocket) ───────────────────────────
@@ -406,7 +394,7 @@ async function startStreams() {
   }
   await createListenKey();
   connectUserStream();
-  connectPriceStream();
+  startPriceMonitor();
 
   // Keep alive every 30 minutes
   setInterval(keepAliveListenKey, 30 * 60 * 1000);
