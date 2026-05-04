@@ -99,15 +99,19 @@ async function closePositionMarket(symbol, closeSide, positionSide, qty) {
 }
 
 async function moveSL(pos, newSLPrice, reason) {
-  if (pos.moving) return; // prevent double moves
+  if (pos.moving) return null; // prevent double moves
   pos.moving = true;
 
   const key = posKey(pos.symbol, pos.positionSide);
   console.log(`ghost trail: moving SL for ${key} to ${newSLPrice} (${reason})`);
+  console.log(`  using API_KEY: ${API_KEY ? API_KEY.slice(0, 8) + "..." : "NOT SET"}`);
+  console.log(`  using API_SECRET: ${API_SECRET ? "SET" : "NOT SET"}`);
 
   // Cancel current SL
+  let cancelOk = false;
   if (pos.slAlgoId) {
-    await cancelAlgoOrder(pos.symbol, pos.slAlgoId);
+    cancelOk = await cancelAlgoOrder(pos.symbol, pos.slAlgoId);
+    console.log(`  cancel old SL ${pos.slAlgoId}: ${cancelOk ? "OK" : "FAILED"}`);
   }
 
   // Also cancel any other open algo orders for this symbol (safety)
@@ -116,6 +120,7 @@ async function moveSL(pos, newSLPrice, reason) {
       symbol: pos.symbol, timestamp: Date.now(), recvWindow: 5000,
     }, "GET");
     const algoData = await openAlgos.json();
+    console.log(`  open algos: ${algoData?.rows?.length || 0} found`);
     if (Array.isArray(algoData?.rows)) {
       for (const algo of algoData.rows) {
         if (algo.algoId !== pos.slAlgoId) {
@@ -127,9 +132,13 @@ async function moveSL(pos, newSLPrice, reason) {
 
   // Place new SL
   const newAlgoId = await placeNewSL(pos.symbol, pos.closeSide, pos.positionSide, newSLPrice, pos.qty);
+  console.log(`  new SL result: ${newAlgoId ? "algoId=" + newAlgoId : "FAILED"}`);
+
   if (newAlgoId) {
     pos.slAlgoId = newAlgoId;
     pos.currentSL = newSLPrice;
+  } else {
+    console.error(`  CRITICAL: Failed to place new SL at ${newSLPrice} for ${key}`);
   }
 
   pos.moving = false;
@@ -508,6 +517,22 @@ app.post("/position", (req, res) => {
 // View tracked positions
 app.get("/positions", (req, res) => {
   res.json(openPositions);
+});
+
+// Diagnostic: test if proxy can place/cancel orders with its own keys
+app.get("/test-keys", async (req, res) => {
+  try {
+    const r = await signedFetch("/fapi/v2/balance", { timestamp: Date.now(), recvWindow: 5000 }, "GET");
+    const body = await r.json();
+    if (Array.isArray(body)) {
+      const usdt = body.find(b => b.asset === "USDT");
+      res.json({ ok: true, balance: usdt?.availableBalance, keySet: !!API_KEY, secretSet: !!API_SECRET, keyPrefix: API_KEY?.slice(0, 8) });
+    } else {
+      res.json({ ok: false, error: body.msg || body.code, keySet: !!API_KEY, secretSet: !!API_SECRET, keyPrefix: API_KEY?.slice(0, 8) });
+    }
+  } catch (e) {
+    res.json({ ok: false, error: e.message, keySet: !!API_KEY, secretSet: !!API_SECRET });
+  }
 });
 
 // Diagnostic: test price fetch + check TP levels
