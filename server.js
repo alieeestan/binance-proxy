@@ -142,10 +142,15 @@ let priceInterval = null;
 function startPriceMonitor() {
   console.log("Price monitor started (polling every 2s)");
 
+  // Log first poll to confirm it works
+  let pollCount = 0;
+
   priceInterval = setInterval(async () => {
     // Only poll if we have positions to track
     const trackedKeys = Object.keys(openPositions);
     if (trackedKeys.length === 0) return;
+
+    pollCount++;
 
     // Get unique symbols being tracked
     const symbols = [...new Set(trackedKeys.map(k => openPositions[k].symbol))];
@@ -155,7 +160,16 @@ function startPriceMonitor() {
         const r = await fetch(`${BINANCE_BASE}/fapi/v1/ticker/price?symbol=${symbol}`);
         const data = await r.json();
         const markPrice = parseFloat(data.price);
-        if (!markPrice) continue;
+
+        // Log every 30th poll (~1 min) to confirm polling works
+        if (pollCount % 30 === 1) {
+          console.log(`price poll #${pollCount}: ${symbol}=$${markPrice} | tracking ${trackedKeys.length} positions`);
+        }
+
+        if (!markPrice) {
+          console.error(`price poll: no price for ${symbol}`, data);
+          continue;
+        }
 
         // Check both LONG and SHORT positions for this symbol
         for (const posSide of ["LONG", "SHORT"]) {
@@ -494,6 +508,39 @@ app.post("/position", (req, res) => {
 // View tracked positions
 app.get("/positions", (req, res) => {
   res.json(openPositions);
+});
+
+// Diagnostic: test price fetch + check TP levels
+app.get("/ghost-status", async (req, res) => {
+  const keys = Object.keys(openPositions);
+  if (keys.length === 0) return res.json({ positions: 0, message: "no positions tracked" });
+
+  const results = {};
+  for (const key of keys) {
+    const pos = openPositions[key];
+    try {
+      const r = await fetch(`${BINANCE_BASE}/fapi/v1/ticker/price?symbol=${pos.symbol}`);
+      const data = await r.json();
+      const price = parseFloat(data.price);
+      const isLong = pos.positionSide === "LONG";
+      const tp1 = parseFloat(pos.tp1Price || 0);
+      const tp2 = parseFloat(pos.tp2Price || 0);
+      const tp3 = parseFloat(pos.tp3Price || 0);
+
+      results[key] = {
+        price,
+        entry: pos.entryPrice,
+        currentSL: pos.currentSL,
+        tp1: tp1, tp1Hit: isLong ? price >= tp1 : price <= tp1, tp1Reached: pos.tp1Reached,
+        tp2: tp2, tp2Hit: isLong ? price >= tp2 : price <= tp2, tp2Reached: pos.tp2Reached,
+        tp3: tp3, tp3Hit: isLong ? price >= tp3 : price <= tp3, tp3Reached: pos.tp3Reached,
+        moving: pos.moving,
+      };
+    } catch (e) {
+      results[key] = { error: e.message };
+    }
+  }
+  res.json(results);
 });
 
 // Proxy endpoint
